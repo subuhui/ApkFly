@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -76,6 +77,50 @@ abstract class BaseStoreChannel extends StoreChannel {
       'yyyy-MM-dd HH:mm:ss',
     ).format(DateTime.fromMillisecondsSinceEpoch(millis));
   }
+
+  String formatReleaseTime(int millis) {
+    if (millis <= 0) return '';
+    return DateFormat(
+      "yyyy-MM-dd'T'HH:mm:ssZ",
+    ).format(DateTime.fromMillisecondsSinceEpoch(millis));
+  }
+
+  void checkResultCode(
+    Map<String, dynamic> result,
+    String action, {
+    String codeKey = 'code',
+    num successCode = 0,
+    String messageKey = 'msg',
+  }) {
+    checkApiSuccess(
+      result[codeKey] as num?,
+      successCode,
+      action,
+      result[messageKey]?.toString() ?? '',
+    );
+  }
+
+  String requiredText(
+    Map<String, dynamic> map,
+    List<String> keys,
+    String label,
+  ) {
+    final value = firstNonBlank(keys.map((key) => map[key]));
+    if (value == null) {
+      throw StateError('$storeName 缺少必要字段: $label, response: $map');
+    }
+    return value;
+  }
+
+  String? firstNonBlank(Iterable<Object?> values) {
+    for (final value in values) {
+      final text = value?.toString().trim();
+      if (text != null && text.isNotEmpty && text != 'null') {
+        return text;
+      }
+    }
+    return null;
+  }
 }
 
 class HuaweiStoreChannel extends BaseStoreChannel {
@@ -144,6 +189,14 @@ class HuaweiStoreChannel extends BaseStoreChannel {
     return appId.toString();
   }
 
+  void _checkHuaweiResult(Map<String, dynamic> result, String action) {
+    final ret = result['ret'];
+    if (ret is Map) {
+      final retMap = ret.cast<String, dynamic>();
+      checkResultCode(retMap, action, messageKey: 'msg');
+    }
+  }
+
   @override
   Future<StoreReviewSnapshot> fetchReviewSnapshot(String applicationId) async {
     final token = await _token();
@@ -156,6 +209,7 @@ class HuaweiStoreChannel extends BaseStoreChannel {
         'Authorization': 'Bearer $token',
       },
     );
+    _checkHuaweiResult(result, '获取华为 App信息');
     return _parseHuaweiMarketInfo(result);
   }
 
@@ -177,7 +231,7 @@ class HuaweiStoreChannel extends BaseStoreChannel {
       _ => StoreReviewState.unknown,
     };
     final versionCode = int.tryParse(info['versionCode']?.toString() ?? '');
-    final versionName = _firstNonBlank([
+    final versionName = firstNonBlank([
       info['versionNumber'],
       info['onShelfVersionNumber'],
       info['versionName'],
@@ -189,14 +243,6 @@ class HuaweiStoreChannel extends BaseStoreChannel {
           ? null
           : StoreVersion(versionCode ?? 0, versionName ?? ''),
     );
-  }
-
-  String? _firstNonBlank(List<Object?> values) {
-    for (final value in values) {
-      final text = value?.toString().trim();
-      if (text != null && text.isNotEmpty && text != 'null') return text;
-    }
-    return null;
   }
 
   @override
@@ -220,16 +266,27 @@ class HuaweiStoreChannel extends BaseStoreChannel {
         'Authorization': 'Bearer $token',
       },
     );
-    final uploadData = upload['uploadUrl'] ?? upload['url'] ?? upload['data'];
-    final url = uploadData is Map
-        ? uploadData['url'].toString()
-        : uploadData.toString();
-    final headers = uploadData is Map && uploadData['headers'] is Map
+    _checkHuaweiResult(upload, '获取华为上传地址');
+    final uploadData =
+        upload['urlInfo'] ??
+        upload['uploadUrl'] ??
+        upload['url'] ??
+        upload['data'];
+    if (uploadData is! Map) {
+      throw StateError('获取华为上传地址失败: $upload');
+    }
+    final url = requiredText(uploadData.cast<String, dynamic>(), const [
+      'url',
+    ], 'upload url');
+    final objectId = requiredText(uploadData.cast<String, dynamic>(), const [
+      'objectId',
+    ], 'objectId');
+    final headers = uploadData['headers'] is Map
         ? (uploadData['headers'] as Map).cast<String, dynamic>()
         : <String, dynamic>{};
     await http.putFile(url, file, headers: headers, progress: progress);
     progress(100);
-    await http.putJson(
+    final bind = await http.putJson(
       'https://connect-api.cloud.huawei.com/api/publish/v2/app-file-info',
       query: {'appId': appId},
       headers: {
@@ -239,11 +296,20 @@ class HuaweiStoreChannel extends BaseStoreChannel {
       data: {
         'fileType': 5,
         'files': [
-          {'fileName': file.uri.pathSegments.last},
+          {'fileName': file.uri.pathSegments.last, 'fileDestUrl': objectId},
         ],
       },
     );
-    await http.putJson(
+    _checkHuaweiResult(bind, '绑定华为Apk文件');
+    final pkgVersions = bind['pkgVersion'];
+    final pkgId = pkgVersions is List && pkgVersions.isNotEmpty
+        ? pkgVersions.first.toString()
+        : null;
+    if (pkgId == null || pkgId.isEmpty || pkgId == 'null') {
+      throw StateError('华为绑定Apk后缺少 pkgId: $bind');
+    }
+    await _waitHuaweiPackageReady(token, appId, pkgId);
+    final updateDesc = await http.putJson(
       'https://connect-api.cloud.huawei.com/api/publish/v2/app-language-info',
       query: {'appId': appId},
       headers: {
@@ -252,18 +318,66 @@ class HuaweiStoreChannel extends BaseStoreChannel {
       },
       data: {'lang': 'zh-CN', 'newFeatures': versionParams.updateDesc},
     );
-    await http.postJson(
+    _checkHuaweiResult(updateDesc, '更新华为版本说明');
+    final submit = await http.postJson(
       'https://connect-api.cloud.huawei.com/api/publish/v2/app-submit',
       query: {
         'appId': appId,
         if (versionParams.onlineTime > 0)
-          'releaseTime': formatOnlineTime(versionParams.onlineTime),
+          'releaseTime': formatReleaseTime(versionParams.onlineTime),
       },
       headers: {
         'client_id': value('client_id'),
         'Authorization': 'Bearer $token',
       },
     );
+    _checkHuaweiResult(submit, '提交华为审核');
+  }
+
+  Future<void> _waitHuaweiPackageReady(
+    String token,
+    String appId,
+    String pkgId,
+  ) async {
+    final start = DateTime.now();
+    while (DateTime.now().difference(start) < const Duration(minutes: 3)) {
+      await Future<void>.delayed(const Duration(seconds: 10));
+      final result = await http.getJson(
+        'https://connect-api.cloud.huawei.com/api/publish/v2/package/compile/status',
+        query: {'appId': appId, 'pkgIds': pkgId},
+        headers: {
+          'client_id': value('client_id'),
+          'Authorization': 'Bearer $token',
+        },
+      );
+      _checkHuaweiResult(result, '查询华为Apk编译状态');
+      final stateList = result['pkgStateList'];
+      if (stateList is! List || stateList.isEmpty) {
+        continue;
+      }
+      final first = stateList.first;
+      if (first is! Map) continue;
+      final successStatus = int.tryParse(
+        first['successStatus']?.toString() ?? '',
+      );
+      switch (successStatus) {
+        case 0:
+          return;
+        case 1:
+          continue;
+        case 2:
+          throw StateError(
+            '华为Apk编译失败: '
+            'successStatus=2, '
+            'aabCompileStatus=${first['aabCompileStatus']}, '
+            'failReason=${first['failReason']}, '
+            'response: $first',
+          );
+        default:
+          throw StateError('未知华为Apk编译状态: $first');
+      }
+    }
+    throw TimeoutException('等待华为Apk编译完成超时');
   }
 }
 
@@ -297,27 +411,49 @@ class XiaomiStoreChannel extends BaseStoreChannel {
 
   @override
   Future<StoreReviewSnapshot> fetchReviewSnapshot(String applicationId) async {
+    final result = await _queryAppInfo(applicationId);
+    return _parseXiaomiMarketInfo(result);
+  }
+
+  Future<Map<String, dynamic>> _queryAppInfo(String applicationId) {
     final requestData = {
       'userName': value('account'),
       'packageName': applicationId,
     };
-    final result = await http.dio.post<Object?>(
+    return http.postJson(
       'https://api.developer.xiaomi.com/devupload/dev/query',
       data: FormData.fromMap({
         'RequestData': jsonEncode(requestData),
         'SIG': _encryptedSig(_sig(requestData)),
       }),
     );
-    final map = HttpChannelClient().dio == http.dio
-        ? (result.data as Map).cast<String, dynamic>()
-        : <String, dynamic>{};
+  }
+
+  StoreReviewSnapshot _parseXiaomiMarketInfo(Map<String, dynamic> result) {
     checkApiSuccess(
-      map['result'] as num?,
+      result['result'] as num?,
       0,
       '获取小米App信息',
-      map['message']?.toString() ?? '',
+      result['message']?.toString() ?? '',
     );
-    return parseReviewSnapshot(map);
+    final packageInfo = result['packageInfo'];
+    final updateVersion = result['updateVersion'] == true;
+    if (packageInfo is! Map) {
+      return const StoreReviewSnapshot(reviewState: StoreReviewState.unknown);
+    }
+    final info = packageInfo.cast<String, dynamic>();
+    return StoreReviewSnapshot(
+      reviewState: updateVersion
+          ? StoreReviewState.online
+          : StoreReviewState.underReview,
+      enableSubmit: updateVersion,
+      lastVersion: updateVersion
+          ? StoreVersion(
+              int.tryParse(info['versionCode']?.toString() ?? '') ?? 0,
+              info['versionName']?.toString() ?? '',
+            )
+          : null,
+    );
   }
 
   @override
@@ -327,10 +463,22 @@ class XiaomiStoreChannel extends BaseStoreChannel {
     ReleasePlan versionParams,
     ProgressCallback progress,
   ) async {
+    final appInfoResult = await _queryAppInfo(apkInfo.applicationId);
+    checkApiSuccess(
+      appInfoResult['result'] as num?,
+      0,
+      '获取小米App信息',
+      appInfoResult['message']?.toString() ?? '',
+    );
+    final packageInfo = appInfoResult['packageInfo'];
+    if (packageInfo is! Map) {
+      throw StateError('获取小米App信息失败: $appInfoResult');
+    }
     final requestData = {
       'userName': value('account'),
       'synchroType': 1,
       'appInfo': {
+        'appName': packageInfo['appName']?.toString() ?? '',
         'packageName': apkInfo.applicationId,
         'updateDesc': versionParams.updateDesc,
         if (versionParams.onlineTime > 0)
@@ -403,17 +551,46 @@ class OppoStoreChannel extends BaseStoreChannel {
   @override
   Future<StoreReviewSnapshot> fetchReviewSnapshot(String applicationId) async {
     final token = await _token();
-    final result = await http.getJson(
+    final result = await _getOppoAppInfo(applicationId, token);
+    return _parseOppoMarketInfo(result);
+  }
+
+  Future<Map<String, dynamic>> _getOppoAppInfo(
+    String applicationId,
+    String token,
+  ) {
+    return http.getJson(
       'https://oop-openapi-cn.heytapmobi.com/resource/v1/app/info',
       query: _signed({'pkg_name': applicationId}, token),
     );
+  }
+
+  StoreReviewSnapshot _parseOppoMarketInfo(Map<String, dynamic> result) {
     checkApiSuccess(
       result['errno'] as num?,
       0,
       '获取OPPO App信息',
       result['data']?['message']?.toString() ?? '',
     );
-    return parseReviewSnapshot(result);
+    final data = result['data'];
+    if (data is! Map) {
+      return const StoreReviewSnapshot(reviewState: StoreReviewState.unknown);
+    }
+    final info = data.cast<String, dynamic>();
+    final auditStatus = int.tryParse(info['audit_status']?.toString() ?? '');
+    final reviewState = switch (auditStatus) {
+      111 => StoreReviewState.online,
+      444 => StoreReviewState.rejected,
+      _ => StoreReviewState.underReview,
+    };
+    return StoreReviewSnapshot(
+      reviewState: reviewState,
+      enableSubmit: reviewState != StoreReviewState.underReview,
+      lastVersion: StoreVersion(
+        int.tryParse(info['version_code']?.toString() ?? '') ?? 0,
+        info['version_name']?.toString() ?? '',
+      ),
+    );
   }
 
   @override
@@ -424,6 +601,26 @@ class OppoStoreChannel extends BaseStoreChannel {
     ProgressCallback progress,
   ) async {
     final token = await _token();
+    final appInfoResult = await _getOppoAppInfo(apkInfo.applicationId, token);
+    checkApiSuccess(
+      appInfoResult['errno'] as num?,
+      0,
+      '获取OPPO App信息',
+      appInfoResult['data']?['message']?.toString() ?? '',
+    );
+    final appInfo = appInfoResult['data'];
+    if (appInfo is! Map) {
+      throw StateError('获取OPPO App信息失败: $appInfoResult');
+    }
+    final detail = appInfo.cast<String, dynamic>();
+    final adaptiveType = firstNonBlank([
+      detail['adaptive_type'],
+      detail['adaptiveType'],
+    ]);
+    final electronicCertUrl = firstNonBlank([
+      detail['electronic_cert_url'],
+      detail['electronicCertUrl'],
+    ]);
     final upload = await http.getJson(
       'https://oop-openapi-cn.heytapmobi.com/resource/v1/upload/get-upload-url',
       query: _signed({}, token),
@@ -444,14 +641,59 @@ class OppoStoreChannel extends BaseStoreChannel {
       'apk_url': jsonEncode([
         {'url': apkData['url'], 'md5': apkData['md5'], 'cpu_code': 0},
       ]),
+      'app_name': requiredText(detail, const [
+        'app_name',
+        'appName',
+      ], 'app_name'),
       'update_desc': versionParams.updateDesc,
+      'second_category_id': requiredText(detail, const [
+        'ver_second_category_id',
+        'second_category_id',
+      ], 'second_category_id'),
+      'third_category_id': requiredText(detail, const [
+        'ver_third_category_id',
+        'third_category_id',
+      ], 'third_category_id'),
+      'summary': requiredText(detail, const ['summary'], 'summary'),
+      'detail_desc': requiredText(detail, const ['detail_desc'], 'detail_desc'),
+      'privacy_source_url': requiredText(detail, const [
+        'privacy_source_url',
+      ], 'privacy_source_url'),
+      'icon_url': requiredText(detail, const ['icon_url'], 'icon_url'),
+      'pic_url': requiredText(detail, const ['pic_url'], 'pic_url'),
+      'test_desc': requiredText(detail, const ['test_desc'], 'test_desc'),
+      'business_username': requiredText(detail, const [
+        'business_username',
+      ], 'business_username'),
+      'business_email': requiredText(detail, const [
+        'business_email',
+      ], 'business_email'),
+      'business_mobile': requiredText(detail, const [
+        'business_mobile',
+      ], 'business_mobile'),
+      'age_level': requiredText(detail, const [
+        'age_level',
+        'ageLevel',
+      ], 'age_level'),
+      'adaptive_equipment': requiredText(detail, const [
+        'adaptive_equipment',
+        'adaptiveEquipment',
+      ], 'adaptive_equipment'),
+      'copyright_url': requiredText(detail, const [
+        'copyright_url',
+        'copyrightUrl',
+      ], 'copyright_url'),
+      ...?adaptiveType == null ? null : {'adaptive_type': adaptiveType},
+      ...?electronicCertUrl == null
+          ? null
+          : {'electronic_cert_url': electronicCertUrl},
       'online_type': versionParams.onlineTime > 0 ? '2' : '1',
       if (versionParams.onlineTime > 0)
         'sche_online_time': formatOnlineTime(versionParams.onlineTime),
     };
-    final result = await http.postJson(
+    final result = await http.postForm(
       'https://oop-openapi-cn.heytapmobi.com/resource/v1/app/upd',
-      data: FormData.fromMap(params),
+      data: params,
       query: _signed(params, token),
     );
     checkApiSuccess(
@@ -495,19 +737,44 @@ class VivoStoreChannel extends BaseStoreChannel {
     return data;
   }
 
+  void _checkVivoSuccess(Map<String, dynamic> result, String action) {
+    checkApiSuccess(
+      result['code'] as num?,
+      0,
+      action,
+      result['msg']?.toString() ?? '',
+    );
+    final subCode = int.tryParse(result['subCode']?.toString() ?? '') ?? 0;
+    checkApiSuccess(subCode, 0, action, result['msg']?.toString() ?? '');
+  }
+
   @override
   Future<StoreReviewSnapshot> fetchReviewSnapshot(String applicationId) async {
     final result = await http.getJson(
       'https://developer-api.vivo.com.cn/router/rest',
       query: _signed('app.query.details', {'packageName': applicationId}),
     );
-    checkApiSuccess(
-      result['code'] as num?,
-      0,
-      '查询VIVO应用详情',
-      result['msg']?.toString() ?? '',
+    _checkVivoSuccess(result, '查询VIVO应用详情');
+    final data = result['data'];
+    if (data is! Map) {
+      return const StoreReviewSnapshot(reviewState: StoreReviewState.unknown);
+    }
+    final info = data.cast<String, dynamic>();
+    final status = int.tryParse(info['status']?.toString() ?? '');
+    final reviewState = switch (status) {
+      2 => StoreReviewState.underReview,
+      3 => StoreReviewState.online,
+      4 => StoreReviewState.rejected,
+      _ => StoreReviewState.unknown,
+    };
+    return StoreReviewSnapshot(
+      reviewState: reviewState,
+      enableSubmit: status != 2,
+      lastVersion: StoreVersion(
+        int.tryParse(info['versionCode']?.toString() ?? '') ?? 0,
+        info['versionName']?.toString() ?? '',
+      ),
     );
-    return parseReviewSnapshot(result);
   }
 
   @override
@@ -527,6 +794,7 @@ class VivoStoreChannel extends BaseStoreChannel {
       }),
       progress: progress,
     );
+    _checkVivoSuccess(apk, '上传VIVO apk');
     final data = apk['data'] as Map;
     final params = {
       'packageName': data['packageName'].toString(),
@@ -542,12 +810,7 @@ class VivoStoreChannel extends BaseStoreChannel {
       'https://developer-api.vivo.com.cn/router/rest',
       query: _signed('app.sync.update.app', params),
     );
-    checkApiSuccess(
-      result['code'] as num?,
-      0,
-      '提交VIVO更新',
-      result['msg']?.toString() ?? '',
-    );
+    _checkVivoSuccess(result, '提交VIVO更新');
   }
 }
 
@@ -579,6 +842,10 @@ class HonorStoreChannel extends HuaweiStoreChannel {
     return token.toString();
   }
 
+  void _checkHonorResult(Map<String, dynamic> result, String action) {
+    checkResultCode(result, action);
+  }
+
   @override
   Future<StoreReviewSnapshot> fetchReviewSnapshot(String applicationId) async {
     final token = await _honorToken();
@@ -587,12 +854,14 @@ class HonorStoreChannel extends HuaweiStoreChannel {
       query: {'pkgName': applicationId},
       headers: {'Authorization': 'Bearer $token'},
     );
+    _checkHonorResult(appIdResult, '获取荣耀 AppId');
     final appId = _honorAppIdFrom(appIdResult);
     final result = await http.getJson(
       'https://appmarket-openapi-drcn.cloud.honor.com/openapi/v1/publish/get-app-current-release',
       query: {'appId': appId},
       headers: {'Authorization': 'Bearer $token'},
     );
+    _checkHonorResult(result, '获取荣耀审核状态');
     return _parseHonorMarketInfo(result, appId, token);
   }
 
@@ -613,7 +882,7 @@ class HonorStoreChannel extends HuaweiStoreChannel {
       _ => StoreReviewState.unknown,
     };
     var versionCode = int.tryParse(data['versionCode']?.toString() ?? '');
-    var versionName = _firstNonBlank([
+    var versionName = firstNonBlank([
       data['versionName'],
       data['versionNumber'],
     ]);
@@ -629,7 +898,7 @@ class HonorStoreChannel extends HuaweiStoreChannel {
         versionCode = int.tryParse(
           releaseInfo['versionCode']?.toString() ?? '',
         );
-        versionName = _firstNonBlank([
+        versionName = firstNonBlank([
           releaseInfo['versionName'],
           releaseInfo['versionNumber'],
         ]);
@@ -659,6 +928,7 @@ class HonorStoreChannel extends HuaweiStoreChannel {
       query: {'pkgName': apkInfo.applicationId},
       headers: {'Authorization': auth},
     );
+    _checkHonorResult(appIdResult, '获取荣耀 AppId');
     final appIds = appIdResult['data'];
     final appId = _honorAppIdFrom({'data': appIds});
     final appInfo = await http.getJson(
@@ -666,6 +936,7 @@ class HonorStoreChannel extends HuaweiStoreChannel {
       query: {'appId': appId},
       headers: {'Authorization': auth},
     );
+    _checkHonorResult(appInfo, '获取荣耀 App信息');
     final languageInfo =
         appInfo['data']?['languageInfo'] is List &&
             (appInfo['data']['languageInfo'] as List).isNotEmpty
@@ -679,56 +950,60 @@ class HonorStoreChannel extends HuaweiStoreChannel {
         {
           'fileName': file.uri.pathSegments.last,
           'fileType': 100,
-          'contentLength': await file.length(),
-          'sha256': await fileSha256(file),
+          'fileSize': await file.length(),
+          'fileSha256': await fileSha256(file),
         },
       ],
     );
+    _checkHonorResult(uploadUrls, '获取荣耀上传地址');
     final uploadUrl = (uploadUrls['data'] as List).first as Map;
     await http.postMultipart(
-      uploadUrl['url'].toString(),
+      (uploadUrl['uploadUrl'] ?? uploadUrl['url']).toString(),
       file: file,
       fileField: 'file',
       headers: {'Authorization': auth},
       progress: progress,
     );
-    await http.postJson(
+    final bind = await http.postJson(
       'https://appmarket-openapi-drcn.cloud.honor.com/openapi/v1/publish/update-file-info',
       query: {'appId': appId},
       headers: {'Authorization': auth},
       data: {
-        'files': [
+        'bindingFileList': [
           {'objectId': uploadUrl['objectId']},
         ],
       },
     );
-    await http.postJson(
+    _checkHonorResult(bind, '绑定荣耀已上传Apk');
+    final updateDesc = await http.postJson(
       'https://appmarket-openapi-drcn.cloud.honor.com/openapi/v1/publish/update-language-info',
       query: {'appId': appId},
       headers: {'Authorization': auth},
       data: {
-        'languageInfo': [
+        'languageInfoList': [
           {
+            'languageId': languageInfo['languageId'] ?? 'zh-CN',
             'appName': languageInfo['appName'] ?? '',
             'intro': languageInfo['intro'] ?? '',
             'briefIntro': languageInfo['briefIntro'] ?? '',
-            'desc': versionParams.updateDesc,
+            'newFeature': versionParams.updateDesc,
           },
         ],
+        'setAll': 0,
       },
     );
-    await http.postJson(
+    _checkHonorResult(updateDesc, '更新荣耀版本说明');
+    final submit = await http.postJson(
       'https://appmarket-openapi-drcn.cloud.honor.com/openapi/v1/publish/submit-audit',
       query: {'appId': appId},
       headers: {'Authorization': auth},
       data: {
         'releaseType': versionParams.onlineTime > 0 ? 2 : 1,
         if (versionParams.onlineTime > 0)
-          'releaseTime': DateFormat("yyyy-MM-dd'T'HH:mm:ssZ").format(
-            DateTime.fromMillisecondsSinceEpoch(versionParams.onlineTime),
-          ),
+          'releaseTime': formatReleaseTime(versionParams.onlineTime),
       },
     );
+    _checkHonorResult(submit, '提交荣耀审核');
   }
 
   String _honorAppIdFrom(Map<String, dynamic> result) {
