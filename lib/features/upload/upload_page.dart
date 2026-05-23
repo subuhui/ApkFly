@@ -23,7 +23,7 @@ class UploadPage extends ConsumerWidget {
         ? DateTime.fromMillisecondsSinceEpoch(state.onlineTime)
         : null;
     return AppShell(
-      title: '提交新版本',
+      title: config.name,
       actions: [
         TextButton(
           onPressed: state.running ? null : () => context.go('/'),

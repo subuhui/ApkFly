@@ -47,7 +47,7 @@ class _HomePageState extends ConsumerState<HomePage> {
       });
     }
     return AppShell(
-      title: '软件版本更新',
+      title: current.name,
       actions: [
         DropdownButton<String>(
           value: current.applicationId,

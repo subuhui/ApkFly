@@ -27,16 +27,6 @@ class AppShell extends StatelessWidget {
             ),
             child: Row(
               children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(18),
-                  child: Image.asset(
-                    'assets/images/icon.png',
-                    width: 34,
-                    height: 34,
-                    fit: BoxFit.cover,
-                  ),
-                ),
-                const SizedBox(width: 14),
                 Text(title, style: Theme.of(context).textTheme.titleLarge),
                 const Spacer(),
                 ...?actions,
