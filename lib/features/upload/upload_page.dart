@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:intl/intl.dart';
 
 class UploadPage extends ConsumerWidget {
   const UploadPage({super.key, required this.config});
@@ -17,6 +18,10 @@ class UploadPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final state = ref.watch(uploadControllerProvider(config));
     final controller = ref.read(uploadControllerProvider(config).notifier);
+    final scheduled = state.onlineTime > 0;
+    final releaseAt = scheduled
+        ? DateTime.fromMillisecondsSinceEpoch(state.onlineTime)
+        : null;
     return AppShell(
       title: '提交新版本',
       actions: [
@@ -93,6 +98,52 @@ class UploadPage extends ConsumerWidget {
             onChanged: controller.setUpdateDesc,
           ),
           const SizedBox(height: 18),
+          const FieldLabel('发布方式'),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SegmentedButton<_ReleaseMode>(
+                segments: const [
+                  ButtonSegment<_ReleaseMode>(
+                    value: _ReleaseMode.immediate,
+                    icon: Icon(Icons.flash_on_outlined),
+                    label: Text('立即发布'),
+                  ),
+                  ButtonSegment<_ReleaseMode>(
+                    value: _ReleaseMode.scheduled,
+                    icon: Icon(Icons.schedule),
+                    label: Text('定时发布'),
+                  ),
+                ],
+                selected: {
+                  scheduled ? _ReleaseMode.scheduled : _ReleaseMode.immediate,
+                },
+                onSelectionChanged: state.running
+                    ? null
+                    : (selection) {
+                        if (selection.contains(_ReleaseMode.scheduled)) {
+                          controller.enableScheduledRelease();
+                        } else {
+                          controller.setReleaseNow();
+                        }
+                      },
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: _ReleaseSummaryCard(
+                  scheduled: scheduled,
+                  releaseAt: releaseAt,
+                  onPickDate: state.running || releaseAt == null
+                      ? null
+                      : () => _pickReleaseDate(context, releaseAt, controller),
+                  onPickTime: state.running || releaseAt == null
+                      ? null
+                      : () => _pickReleaseTime(context, releaseAt, controller),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
           Text('目标渠道', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           Wrap(
@@ -117,6 +168,123 @@ class UploadPage extends ConsumerWidget {
           const SizedBox(height: 24),
           for (final entry in state.publishStates.entries)
             _SubmitRow(name: entry.key, state: entry.value),
+        ],
+      ),
+    );
+  }
+}
+
+enum _ReleaseMode { immediate, scheduled }
+
+Future<void> _pickReleaseDate(
+  BuildContext context,
+  DateTime current,
+  UploadController controller,
+) async {
+  final picked = await showDatePicker(
+    context: context,
+    initialDate: current,
+    firstDate: DateTime.now(),
+    lastDate: DateTime.now().add(const Duration(days: 365)),
+  );
+  if (picked == null) return;
+  controller.setOnlineTime(
+    DateTime(
+      picked.year,
+      picked.month,
+      picked.day,
+      current.hour,
+      current.minute,
+    ),
+  );
+}
+
+Future<void> _pickReleaseTime(
+  BuildContext context,
+  DateTime current,
+  UploadController controller,
+) async {
+  final picked = await showTimePicker(
+    context: context,
+    initialTime: TimeOfDay.fromDateTime(current),
+    builder: (context, child) {
+      return MediaQuery(
+        data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: true),
+        child: child!,
+      );
+    },
+  );
+  if (picked == null) return;
+  controller.setOnlineTime(
+    DateTime(
+      current.year,
+      current.month,
+      current.day,
+      picked.hour,
+      picked.minute,
+    ),
+  );
+}
+
+class _ReleaseSummaryCard extends StatelessWidget {
+  const _ReleaseSummaryCard({
+    required this.scheduled,
+    required this.releaseAt,
+    required this.onPickDate,
+    required this.onPickTime,
+  });
+
+  final bool scheduled;
+  final DateTime? releaseAt;
+  final VoidCallback? onPickDate;
+  final VoidCallback? onPickTime;
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    final releaseText = releaseAt == null
+        ? '审核通过后立即发布'
+        : DateFormat('yyyy年MM月dd日 HH:mm').format(releaseAt!);
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: appSurface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: appLine),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            scheduled ? Icons.schedule : Icons.flash_on_outlined,
+            color: scheduled ? appWarning : appAccent,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  scheduled ? '北京时间发布' : '发布时机',
+                  style: textTheme.titleMedium,
+                ),
+                const SizedBox(height: 4),
+                Text(releaseText, style: textTheme.bodyMedium),
+              ],
+            ),
+          ),
+          if (scheduled) ...[
+            OutlinedButton.icon(
+              onPressed: onPickDate,
+              icon: const Icon(Icons.calendar_month_outlined),
+              label: const Text('日期'),
+            ),
+            const SizedBox(width: 8),
+            OutlinedButton.icon(
+              onPressed: onPickTime,
+              icon: const Icon(Icons.access_time),
+              label: const Text('时间'),
+            ),
+          ],
         ],
       ),
     );

@@ -88,6 +88,25 @@ class UploadController extends StateNotifier<UploadState> {
   void setUpdateDesc(String value) =>
       state = state.copyWith(updateDesc: value, error: null);
 
+  void setReleaseNow() => state = state.copyWith(onlineTime: 0, error: null);
+
+  void enableScheduledRelease() {
+    if (state.onlineTime > 0) return;
+    final now = DateTime.now();
+    final nextHour = DateTime(now.year, now.month, now.day, now.hour + 1);
+    state = state.copyWith(
+      onlineTime: nextHour.millisecondsSinceEpoch,
+      error: null,
+    );
+  }
+
+  void setOnlineTime(DateTime value) {
+    state = state.copyWith(
+      onlineTime: value.millisecondsSinceEpoch,
+      error: null,
+    );
+  }
+
   void toggleChannel(String name, bool selected) {
     final next = {...state.selectedChannels};
     selected ? next.add(name) : next.remove(name);
@@ -121,6 +140,21 @@ class UploadController extends StateNotifier<UploadState> {
     if (state.updateDesc.trim().isEmpty) {
       state = state.copyWith(error: '请输入更新说明');
       return;
+    }
+    if (state.onlineTime > 0) {
+      final releaseAt = DateTime.fromMillisecondsSinceEpoch(state.onlineTime);
+      if (!releaseAt.isAfter(DateTime.now())) {
+        state = state.copyWith(
+          error:
+              '定时发布时间必须晚于当前时间：'
+              '${releaseAt.year.toString().padLeft(4, '0')}-'
+              '${releaseAt.month.toString().padLeft(2, '0')}-'
+              '${releaseAt.day.toString().padLeft(2, '0')} '
+              '${releaseAt.hour.toString().padLeft(2, '0')}:'
+              '${releaseAt.minute.toString().padLeft(2, '0')}',
+        );
+        return;
+      }
     }
     state = state.copyWith(running: true, error: null);
     final targets = retryOnly
