@@ -15,11 +15,13 @@ class StoreReviewSnapshot {
     required this.reviewState,
     this.enableSubmit = true,
     this.lastVersion,
+    this.submitDisabledReason,
   });
 
   final StoreReviewState reviewState;
   final bool enableSubmit;
   final StoreVersion? lastVersion;
+  final String? submitDisabledReason;
 }
 
 class StoreVersion {

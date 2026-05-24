@@ -189,6 +189,15 @@ class UploadController extends StateNotifier<UploadState> {
       if (apkFile == null) throw StateError('找不到 $storeName 对应的 APK');
       final apkInfo = await parseApkMetadata(apkFile);
       state = state.copyWith(apkInfo: apkInfo);
+      final reviewSnapshot = await task.fetchReviewSnapshot(
+        apkInfo.applicationId,
+      );
+      if (!reviewSnapshot.enableSubmit) {
+        throw StateError(
+          '$storeName 当前状态不允许提交，'
+          '${reviewSnapshot.submitDisabledReason ?? '状态：${reviewSnapshot.reviewState.label}'}',
+        );
+      }
       setPublishState(storeName, const PublishProcessing('请求中'));
       await task.upload(
         apkFile,

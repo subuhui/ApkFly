@@ -116,18 +116,27 @@ class HttpChannelClient {
     String url, {
     required File file,
     required String fileField,
+    Map<String, File>? extraFiles,
     Map<String, dynamic>? fields,
     Map<String, dynamic>? query,
     Map<String, dynamic>? headers,
     required ProgressCallback progress,
   }) async {
-    final form = FormData.fromMap({
+    final formMap = <String, Object?>{
       ...?fields,
       fileField: await MultipartFile.fromFile(
         file.path,
         filename: file.uri.pathSegments.last,
       ),
-    });
+    };
+    for (final entry
+        in extraFiles?.entries ?? const <MapEntry<String, File>>[]) {
+      formMap[entry.key] = await MultipartFile.fromFile(
+        entry.value.path,
+        filename: entry.value.uri.pathSegments.last,
+      );
+    }
+    final form = FormData.fromMap(formMap);
     final response = await dio.post<Object?>(
       url,
       data: form,

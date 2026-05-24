@@ -73,17 +73,18 @@ abstract class BaseStoreChannel extends StoreChannel {
 
   String formatOnlineTime(int millis) {
     if (millis <= 0) return '';
-    return DateFormat(
-      'yyyy-MM-dd HH:mm:ss',
-    ).format(DateTime.fromMillisecondsSinceEpoch(millis));
+    return DateFormat('yyyy-MM-dd HH:mm:ss').format(_chinaTime(millis));
   }
 
   String formatReleaseTime(int millis) {
     if (millis <= 0) return '';
-    return DateFormat(
-      "yyyy-MM-dd'T'HH:mm:ssZ",
-    ).format(DateTime.fromMillisecondsSinceEpoch(millis));
+    return "${DateFormat("yyyy-MM-dd'T'HH:mm:ss").format(_chinaTime(millis))}+0800";
   }
+
+  DateTime _chinaTime(int millis) => DateTime.fromMillisecondsSinceEpoch(
+    millis,
+    isUtc: true,
+  ).add(const Duration(hours: 8));
 
   void checkResultCode(
     Map<String, dynamic> result,
@@ -397,6 +398,7 @@ class XiaomiStoreChannel extends BaseStoreChannel {
       textFileExtension: 'cer',
     ),
     StoreCredentialDefinition('privateKey', desc: '私钥'),
+    StoreCredentialDefinition('iconPath', desc: '应用图标文件路径'),
   ];
 
   Map<String, dynamic> _sig(Map<String, dynamic> requestData, [File? file]) {
@@ -474,6 +476,13 @@ class XiaomiStoreChannel extends BaseStoreChannel {
     if (packageInfo is! Map) {
       throw StateError('获取小米App信息失败: $appInfoResult');
     }
+    if (appInfoResult['updateVersion'] != true) {
+      throw StateError('小米当前状态不允许更新版本，请先检查商店后台状态');
+    }
+    final iconFile = File(value('iconPath'));
+    if (!iconFile.existsSync()) {
+      throw StateError('小米 iconPath 文件不存在: ${iconFile.path}');
+    }
     final requestData = {
       'userName': value('account'),
       'synchroType': 1,
@@ -487,10 +496,12 @@ class XiaomiStoreChannel extends BaseStoreChannel {
     };
     final sig = _sig(requestData, file);
     (sig['sig'] as List).add({'name': 'apk', 'hash': await fileMd5(file)});
+    (sig['sig'] as List).add({'name': 'icon', 'hash': await fileMd5(iconFile)});
     final result = await http.postMultipart(
       'https://api.developer.xiaomi.com/devupload/dev/push',
       file: file,
       fileField: 'apk',
+      extraFiles: {'icon': iconFile},
       fields: {
         'RequestData': jsonEncode(requestData),
         'SIG': _encryptedSig(sig),
@@ -887,31 +898,93 @@ class HonorStoreChannel extends HuaweiStoreChannel {
       data['versionNumber'],
     ]);
 
-    if (versionCode == null && versionName == null) {
-      final detail = await http.getJson(
-        'https://appmarket-openapi-drcn.cloud.honor.com/openapi/v1/publish/get-app-detail',
-        query: {'appId': appId},
-        headers: {'Authorization': 'Bearer $token'},
+    final detail = await http.getJson(
+      'https://appmarket-openapi-drcn.cloud.honor.com/openapi/v1/publish/get-app-detail',
+      query: {'appId': appId},
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    final releaseInfo = detail['data']?['releaseInfo'];
+    if ((versionCode == null || versionName == null) && releaseInfo is Map) {
+      versionCode ??= int.tryParse(
+        releaseInfo['versionCode']?.toString() ?? '',
       );
-      final releaseInfo = detail['data']?['releaseInfo'];
-      if (releaseInfo is Map) {
-        versionCode = int.tryParse(
-          releaseInfo['versionCode']?.toString() ?? '',
-        );
-        versionName = firstNonBlank([
-          releaseInfo['versionName'],
-          releaseInfo['versionNumber'],
-        ]);
-      }
+      versionName ??= firstNonBlank([
+        releaseInfo['versionName'],
+        releaseInfo['versionNumber'],
+      ]);
     }
+    final publishInfo = detail['data']?['publishInfo'];
+    final phasedReleaseActive = await _hasHonorPhasedRelease(appId, token);
+    final scheduledReleasePending = _isHonorScheduledReleasePending(
+      data,
+      publishInfo,
+      releaseInfo,
+    );
+    final submitDisabledReason = phasedReleaseActive
+        ? '存在待分阶段发布或分阶段发布中的版本'
+        : scheduledReleasePending
+        ? '存在待发布时间的版本'
+        : auditResult == 0
+        ? '当前版本审核中'
+        : null;
 
     return StoreReviewSnapshot(
       reviewState: reviewState,
-      enableSubmit: auditResult != 0,
+      enableSubmit:
+          auditResult != 0 && !phasedReleaseActive && !scheduledReleasePending,
       lastVersion: versionCode == null && versionName == null
           ? null
           : StoreVersion(versionCode ?? 0, versionName ?? ''),
+      submitDisabledReason: submitDisabledReason,
     );
+  }
+
+  Future<bool> _hasHonorPhasedRelease(String appId, String token) async {
+    final result = await http.getJson(
+      'https://appmarket-openapi-drcn.cloud.honor.com/openapi/v1/publish/get-phased-release-info',
+      query: {'appId': appId},
+      headers: {'Authorization': 'Bearer $token'},
+    );
+    _checkHonorResult(result, '获取荣耀分阶段发布状态');
+    final data = result['data'];
+    if (data == null) return false;
+    if (data is List) return data.isNotEmpty;
+    if (data is Map) return data.isNotEmpty;
+    return data.toString().trim().isNotEmpty && data.toString() != 'null';
+  }
+
+  bool _isHonorScheduledReleasePending(
+    Map<String, dynamic> currentRelease,
+    Object? publishInfo,
+    Object? releaseInfo,
+  ) {
+    if (publishInfo is! Map) return false;
+    final info = publishInfo.cast<String, dynamic>();
+    final releaseType = int.tryParse(info['releaseType']?.toString() ?? '');
+    if (releaseType != 2) return false;
+    final releaseTime = _parseUtcLikeTime(info['releaseTime']?.toString());
+    if (releaseTime == null || !releaseTime.isAfter(DateTime.now())) {
+      return false;
+    }
+    final latestVersionCode = int.tryParse(
+      currentRelease['versionCode']?.toString() ?? '',
+    );
+    final onlineVersionCode = releaseInfo is Map
+        ? int.tryParse(releaseInfo['versionCode']?.toString() ?? '')
+        : null;
+    return latestVersionCode != null &&
+        onlineVersionCode != null &&
+        latestVersionCode != onlineVersionCode;
+  }
+
+  DateTime? _parseUtcLikeTime(String? value) {
+    final text = value?.trim();
+    if (text == null || text.isEmpty) return null;
+    final normalized = text.replaceFirstMapped(
+      RegExp(r'([+-]\d{2})(\d{2})$'),
+      (m) => '${m[1]}:${m[2]}',
+    );
+    return DateTime.tryParse(normalized);
   }
 
   @override
