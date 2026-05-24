@@ -310,6 +310,7 @@ class HuaweiStoreChannel extends BaseStoreChannel {
       throw StateError('华为绑定Apk后缺少 pkgId: $bind');
     }
     await _waitHuaweiPackageReady(token, appId, pkgId);
+    await _waitHuaweiSubmitWindow(token, appId, apkInfo);
     final updateDesc = await http.putJson(
       'https://connect-api.cloud.huawei.com/api/publish/v2/app-language-info',
       query: {'appId': appId},
@@ -379,6 +380,51 @@ class HuaweiStoreChannel extends BaseStoreChannel {
       }
     }
     throw TimeoutException('等待华为Apk编译完成超时');
+  }
+
+  Future<void> _waitHuaweiSubmitWindow(
+    String token,
+    String appId,
+    ApkMetadata apkInfo,
+  ) async {
+    final deadline = DateTime.now().add(const Duration(minutes: 2));
+    while (DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(seconds: 15));
+      final result = await http.getJson(
+        'https://connect-api.cloud.huawei.com/api/publish/v2/app-info',
+        query: {'appId': appId},
+        headers: {
+          'client_id': value('client_id'),
+          'Authorization': 'Bearer $token',
+        },
+      );
+      _checkHuaweiResult(result, '获取华为 App信息');
+      if (_isHuaweiDraftVersionVisible(result, apkInfo)) {
+        return;
+      }
+    }
+  }
+
+  bool _isHuaweiDraftVersionVisible(
+    Map<String, dynamic> result,
+    ApkMetadata apkInfo,
+  ) {
+    final rawInfo =
+        result['appInfo'] ??
+        result['data']?['appInfo'] ??
+        result['data'] ??
+        result;
+    if (rawInfo is! Map) return false;
+    final info = rawInfo.cast<String, dynamic>();
+    final visibleVersionCode = int.tryParse(
+      info['versionCode']?.toString() ?? '',
+    );
+    final visibleVersionName = firstNonBlank([
+      info['versionNumber'],
+      info['versionName'],
+    ]);
+    return visibleVersionCode == apkInfo.versionCode &&
+        visibleVersionName == apkInfo.versionName;
   }
 }
 
