@@ -124,12 +124,14 @@ class StoreCredentialDefinition {
     this.defaultValue,
     this.desc,
     this.textFileExtension,
+    this.pickFilePath = false,
   });
 
   final String name;
   final String? defaultValue;
   final String? desc;
   final String? textFileExtension;
+  final bool pickFilePath;
 }
 
 abstract class StoreChannel {

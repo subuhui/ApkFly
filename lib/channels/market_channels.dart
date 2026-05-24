@@ -444,7 +444,7 @@ class XiaomiStoreChannel extends BaseStoreChannel {
       textFileExtension: 'cer',
     ),
     StoreCredentialDefinition('privateKey', desc: '私钥'),
-    StoreCredentialDefinition('iconPath', desc: '应用图标文件路径'),
+    StoreCredentialDefinition('iconPath', desc: '应用图标文件路径', pickFilePath: true),
   ];
 
   Map<String, dynamic> _sig(Map<String, dynamic> requestData, [File? file]) {

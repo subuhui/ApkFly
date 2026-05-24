@@ -173,9 +173,7 @@ class _ChannelEditor extends StatelessWidget {
                     width: 360,
                     child: _ParamField(
                       param: channel.params[i],
-                      textFileExtension: _paramExtension(
-                        channel.params[i].name,
-                      ),
+                      definition: _paramDefinition(channel.params[i].name),
                       onChanged: (value) {
                         final next = [...channel.params]
                           ..[i] = channel.params[i].copyWith(value: value);
@@ -191,55 +189,93 @@ class _ChannelEditor extends StatelessWidget {
     );
   }
 
-  String? _paramExtension(String name) {
+  StoreCredentialDefinition? _paramDefinition(String name) {
     for (final param in params) {
       if (param.name == name) {
-        return param.textFileExtension;
+        return param;
       }
     }
     return null;
   }
 }
 
-class _ParamField extends StatelessWidget {
+class _ParamField extends StatefulWidget {
   const _ParamField({
     required this.param,
     required this.onChanged,
-    this.textFileExtension,
+    this.definition,
   });
 
   final StoreCredential param;
   final ValueChanged<String> onChanged;
-  final String? textFileExtension;
+  final StoreCredentialDefinition? definition;
+
+  @override
+  State<_ParamField> createState() => _ParamFieldState();
+}
+
+class _ParamFieldState extends State<_ParamField> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.param.value);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ParamField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.param.value != widget.param.value &&
+        _controller.text != widget.param.value) {
+      _controller.text = widget.param.value;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
+    final textFileExtension = widget.definition?.textFileExtension;
+    final pickFilePath = widget.definition?.pickFilePath == true;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        FieldLabel(param.name),
+        FieldLabel(widget.param.name),
         TextFormField(
-          initialValue: param.value,
+          controller: _controller,
           minLines:
-              param.name.toLowerCase().contains('secret') ||
-                  param.name.toLowerCase().contains('key')
+              widget.param.name.toLowerCase().contains('secret') ||
+                  widget.param.name.toLowerCase().contains('key')
               ? 1
               : 1,
-          maxLines: param.name == 'publicKey' ? 4 : 1,
-          onChanged: onChanged,
+          maxLines: widget.param.name == 'publicKey' ? 4 : 1,
+          onChanged: widget.onChanged,
           decoration: InputDecoration(
-            suffixIcon: textFileExtension == null
+            suffixIcon: textFileExtension == null && !pickFilePath
                 ? null
                 : IconButton(
                     icon: const Icon(Icons.file_open),
                     onPressed: () async {
-                      final file = await FilePicker.platform.pickFiles(
-                        type: FileType.custom,
-                        allowedExtensions: [textFileExtension!],
-                      );
+                      final file = textFileExtension == null
+                          ? await FilePicker.platform.pickFiles(
+                              type: FileType.any,
+                            )
+                          : await FilePicker.platform.pickFiles(
+                              type: FileType.custom,
+                              allowedExtensions: [textFileExtension],
+                            );
                       final path = file?.files.single.path;
                       if (path != null) {
-                        onChanged(await File(path).readAsString());
+                        final value = pickFilePath
+                            ? path
+                            : await File(path).readAsString();
+                        _controller.text = value;
+                        widget.onChanged(value);
                       }
                     },
                   ),
