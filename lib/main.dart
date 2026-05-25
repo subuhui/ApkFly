@@ -7,20 +7,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:window_manager/window_manager.dart';
 
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
   await AppLogger.instance.install();
-
-  FlutterError.onError = (details) {
-    FlutterError.presentError(details);
-    AppLogger.instance.error(
-      'Flutter',
-      details.exceptionAsString(),
-      details.stack,
-    );
-  };
 
   await runZonedGuarded(
     () async {
+      WidgetsFlutterBinding.ensureInitialized();
+
+      FlutterError.onError = (details) {
+        FlutterError.presentError(details);
+        AppLogger.instance.error(
+          'Flutter',
+          details.exceptionAsString(),
+          details.stack,
+        );
+      };
       await windowManager.ensureInitialized();
       await windowManager.waitUntilReadyToShow(
         const WindowOptions(
