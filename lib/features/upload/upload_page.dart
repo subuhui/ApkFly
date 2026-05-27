@@ -9,15 +9,39 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
-class UploadPage extends ConsumerWidget {
+class UploadPage extends ConsumerStatefulWidget {
   const UploadPage({super.key, required this.config});
 
   final AppProfile config;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<UploadPage> createState() => _UploadPageState();
+}
+
+class _UploadPageState extends ConsumerState<UploadPage> {
+  late final TextEditingController _apkPathController;
+
+  @override
+  void initState() {
+    super.initState();
+    _apkPathController = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _apkPathController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final config = widget.config;
     final state = ref.watch(uploadControllerProvider(config));
     final controller = ref.read(uploadControllerProvider(config).notifier);
+
+    if (_apkPathController.text != state.apkPath) {
+      _apkPathController.text = state.apkPath;
+    }
     final scheduled = state.onlineTime > 0;
     final releaseAt = scheduled
         ? DateTime.fromMillisecondsSinceEpoch(state.onlineTime)
@@ -31,9 +55,8 @@ class UploadPage extends ConsumerWidget {
         ),
         const SizedBox(width: 8),
         OutlinedButton.icon(
-          onPressed: state.running
-              ? null
-              : () => controller.start(retryOnly: true),
+          onPressed:
+              state.running ? null : () => controller.start(retryOnly: true),
           icon: const Icon(Icons.refresh),
           label: const Text('重试失败'),
         ),
@@ -56,7 +79,7 @@ class UploadPage extends ConsumerWidget {
                   children: [
                     const FieldLabel('APK 文件或目录'),
                     TextFormField(
-                      initialValue: state.apkPath,
+                      controller: _apkPathController,
                       onChanged: controller.setApkPath,
                       decoration: const InputDecoration(
                         hintText: '选择单 APK，或多渠道包目录',
@@ -95,6 +118,10 @@ class UploadPage extends ConsumerWidget {
             initialValue: state.updateDesc,
             minLines: 4,
             maxLines: 8,
+            decoration: const InputDecoration(
+              hintText:
+                  '请输入本次版本更新说明；留空时，VIVO / 小米 / OPPO / 华为 / 荣耀将复用商店详情中的已有说明',
+            ),
             onChanged: controller.setUpdateDesc,
           ),
           const SizedBox(height: 18),
@@ -157,7 +184,7 @@ class UploadPage extends ConsumerWidget {
                   onSelected: state.running
                       ? null
                       : (selected) =>
-                            controller.toggleChannel(channel.name, selected),
+                          controller.toggleChannel(channel.name, selected),
                 ),
             ],
           ),
@@ -330,10 +357,10 @@ class _SubmitRow extends StatelessWidget {
   }
 
   IconData _iconFor(PublishState state) => switch (state) {
-    PublishSuccess() => Icons.check_circle,
-    PublishFailure() => Icons.error,
-    PublishUploading() => Icons.upload,
-    PublishProcessing() => Icons.hourglass_bottom,
-    _ => Icons.radio_button_unchecked,
-  };
+        PublishSuccess() => Icons.check_circle,
+        PublishFailure() => Icons.error,
+        PublishUploading() => Icons.upload,
+        PublishProcessing() => Icons.hourglass_bottom,
+        _ => Icons.radio_button_unchecked,
+      };
 }

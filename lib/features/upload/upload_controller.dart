@@ -4,15 +4,14 @@ import 'package:apk_fly/app/providers.dart';
 import 'package:apk_fly/channels/channel_models.dart';
 import 'package:apk_fly/config/app_profile.dart';
 import 'package:apk_fly/services/app_logger.dart';
-import 'package:apk_fly/utils/apk_parser.dart';
 import 'package:apk_fly/utils/file_util.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 
 final uploadControllerProvider = StateNotifierProvider.autoDispose
     .family<UploadController, UploadState, AppProfile>(
-      (ref, config) => UploadController(ref, config),
-    );
+  (ref, config) => UploadController(ref, config),
+);
 
 class UploadState {
   const UploadState({
@@ -23,7 +22,6 @@ class UploadState {
     this.selectedChannels = const {},
     this.publishStates = const {},
     this.running = false,
-    this.apkInfo,
     this.error,
   });
 
@@ -34,7 +32,6 @@ class UploadState {
   final Set<String> selectedChannels;
   final Map<String, PublishState> publishStates;
   final bool running;
-  final ApkMetadata? apkInfo;
   final String? error;
 
   UploadState copyWith({
@@ -44,7 +41,6 @@ class UploadState {
     Set<String>? selectedChannels,
     Map<String, PublishState>? publishStates,
     bool? running,
-    ApkMetadata? apkInfo,
     String? error,
   }) {
     return UploadState(
@@ -55,7 +51,6 @@ class UploadState {
       selectedChannels: selectedChannels ?? this.selectedChannels,
       publishStates: publishStates ?? this.publishStates,
       running: running ?? this.running,
-      apkInfo: apkInfo ?? this.apkInfo,
       error: error,
     );
   }
@@ -63,22 +58,20 @@ class UploadState {
 
 class UploadController extends StateNotifier<UploadState> {
   UploadController(this.ref, AppProfile config)
-    : super(
-        UploadState(
-          config: config,
-          updateDesc: config.preferences.updateDesc ?? '',
-          apkPath: config.preferences.apkDir ?? '',
-          selectedChannels: config.stores
-              .where((e) => e.enable)
-              .map((e) => e.name)
-              .toSet(),
-          publishStates: {
-            for (final name
-                in config.stores.where((e) => e.enable).map((e) => e.name))
-              name: const PublishIdle(),
-          },
-        ),
-      );
+      : super(
+          UploadState(
+            config: config,
+            updateDesc: config.preferences.updateDesc ?? '',
+            apkPath: config.preferences.apkDir ?? '',
+            selectedChannels:
+                config.stores.where((e) => e.enable).map((e) => e.name).toSet(),
+            publishStates: {
+              for (final name
+                  in config.stores.where((e) => e.enable).map((e) => e.name))
+                name: const PublishIdle(),
+            },
+          ),
+        );
 
   final Ref ref;
 
@@ -119,34 +112,16 @@ class UploadController extends StateNotifier<UploadState> {
     );
   }
 
-  Future<void> parseSelectedApk() async {
-    final file = File(state.apkPath);
-    final apk = file.existsSync() && file.path.toLowerCase().endsWith('.apk')
-        ? file
-        : await _findApkFor(_firstOrNull(state.selectedChannels));
-    if (apk == null) {
-      state = state.copyWith(error: '找不到 APK 文件');
-      return;
-    }
-    final info = await parseApkMetadata(apk);
-    state = state.copyWith(apkPath: file.path, apkInfo: info, error: null);
-  }
-
   Future<void> start({bool retryOnly = false}) async {
     if (state.selectedChannels.isEmpty) {
       state = state.copyWith(error: '请至少选择一个渠道');
-      return;
-    }
-    if (state.updateDesc.trim().isEmpty) {
-      state = state.copyWith(error: '请输入更新说明');
       return;
     }
     if (state.onlineTime > 0) {
       final releaseAt = DateTime.fromMillisecondsSinceEpoch(state.onlineTime);
       if (!releaseAt.isAfter(DateTime.now())) {
         state = state.copyWith(
-          error:
-              '定时发布时间必须晚于当前时间：'
+          error: '定时发布时间必须晚于当前时间：'
               '${releaseAt.year.toString().padLeft(4, '0')}-'
               '${releaseAt.month.toString().padLeft(2, '0')}-'
               '${releaseAt.day.toString().padLeft(2, '0')} '
@@ -156,13 +131,17 @@ class UploadController extends StateNotifier<UploadState> {
         return;
       }
     }
-    state = state.copyWith(running: true, error: null);
     final targets = retryOnly
         ? state.publishStates.entries
-              .where((e) => e.value is PublishFailure)
-              .map((e) => e.key)
-              .toSet()
+            .where((e) => e.value is PublishFailure)
+            .map((e) => e.key)
+            .toSet()
         : state.selectedChannels;
+    if (!_canStartWithoutUpdateDesc(targets)) {
+      state = state.copyWith(error: '请输入更新说明');
+      return;
+    }
+    state = state.copyWith(running: true, error: null);
     final params = ReleasePlan(
       updateDesc: state.updateDesc.trim(),
       onlineTime: state.onlineTime,
@@ -187,10 +166,9 @@ class UploadController extends StateNotifier<UploadState> {
       });
       final apkFile = await _findApkFor(storeName);
       if (apkFile == null) throw StateError('找不到 $storeName 对应的 APK');
-      final apkInfo = await parseApkMetadata(apkFile);
-      state = state.copyWith(apkInfo: apkInfo);
+      final applicationId = state.config.applicationId.trim();
       final reviewSnapshot = await task.fetchReviewSnapshot(
-        apkInfo.applicationId,
+        applicationId,
       );
       if (!reviewSnapshot.enableSubmit) {
         throw StateError(
@@ -198,11 +176,12 @@ class UploadController extends StateNotifier<UploadState> {
           '${reviewSnapshot.submitDisabledReason ?? '状态：${reviewSnapshot.reviewState.label}'}',
         );
       }
+      final resolvedParams = task.resolveReleasePlan(params, reviewSnapshot);
       setPublishState(storeName, const PublishProcessing('请求中'));
       await task.upload(
         apkFile,
-        apkInfo,
-        params,
+        applicationId,
+        resolvedParams,
         (progress) => setPublishState(storeName, PublishUploading(progress)),
       );
       setPublishState(storeName, const PublishSuccess());
@@ -232,8 +211,8 @@ class UploadController extends StateNotifier<UploadState> {
     final apks = await listApks(selected);
     for (final apk in apks) {
       if (apk.uri.pathSegments.last.toLowerCase().contains(
-        identify.toLowerCase(),
-      )) {
+            identify.toLowerCase(),
+          )) {
         return apk;
       }
     }
@@ -244,6 +223,20 @@ class UploadController extends StateNotifier<UploadState> {
     state = state.copyWith(
       publishStates: {...state.publishStates, name: submitState},
     );
+  }
+
+  bool _canStartWithoutUpdateDesc(Set<String> targets) {
+    if (state.updateDesc.trim().isNotEmpty) {
+      return true;
+    }
+    final registry = ref.read(channelRegistryProvider);
+    for (final storeName in targets) {
+      final task = registry.byName(storeName);
+      if (task == null || !task.allowsEmptyUpdateDesc) {
+        return false;
+      }
+    }
+    return true;
   }
 }
 

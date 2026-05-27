@@ -25,18 +25,17 @@ abstract class BaseStoreChannel extends StoreChannel {
     final rejected =
         text.contains('拒') || text.toLowerCase().contains('reject');
     final review = text.contains('审核') || text.toLowerCase().contains('review');
-    final online =
-        text.contains('上线') ||
+    final online = text.contains('上线') ||
         text.toLowerCase().contains('online') ||
         text.toLowerCase().contains('release');
     return StoreReviewSnapshot(
       reviewState: rejected
           ? StoreReviewState.rejected
           : review
-          ? StoreReviewState.underReview
-          : online
-          ? StoreReviewState.online
-          : StoreReviewState.unknown,
+              ? StoreReviewState.underReview
+              : online
+                  ? StoreReviewState.online
+                  : StoreReviewState.unknown,
       enableSubmit: !review,
       lastVersion: _looseVersion(data),
     );
@@ -82,9 +81,9 @@ abstract class BaseStoreChannel extends StoreChannel {
   }
 
   DateTime _chinaTime(int millis) => DateTime.fromMillisecondsSinceEpoch(
-    millis,
-    isUtc: true,
-  ).add(const Duration(hours: 8));
+        millis,
+        isUtc: true,
+      ).add(const Duration(hours: 8));
 
   void checkResultCode(
     Map<String, dynamic> result,
@@ -122,6 +121,70 @@ abstract class BaseStoreChannel extends StoreChannel {
     }
     return null;
   }
+
+  String? findNestedTextByKeys(Object? value, Iterable<String> keys) {
+    final lowered = {for (final key in keys) key.toLowerCase()};
+    return _findNestedTextByKeys(value, lowered);
+  }
+
+  String? fallbackUpdateDescFromDetail(Object? value) {
+    return findNestedTextByKeys(value, const [
+      'updateDesc',
+      'update_desc',
+      'apkUpdateDesc',
+      'newFeature',
+      'newFeatures',
+      'versionDesc',
+      'version_desc',
+      'versionContent',
+      'version_content',
+      'updateContent',
+      'update_content',
+    ]);
+  }
+
+  ReleasePlan resolveReleasePlanWithFallback(
+    ReleasePlan versionParams,
+    StoreReviewSnapshot reviewSnapshot,
+  ) {
+    if (versionParams.updateDesc.trim().isNotEmpty) {
+      return versionParams;
+    }
+    final fallback = reviewSnapshot.fallbackUpdateDesc?.trim();
+    if (fallback == null || fallback.isEmpty) {
+      throw StateError('$storeName 应用详情中未找到更新说明，请手动填写');
+    }
+    return versionParams.copyWith(updateDesc: fallback);
+  }
+
+  String? _findNestedTextByKeys(Object? value, Set<String> keys) {
+    if (value is Map) {
+      for (final entry in value.entries) {
+        final key = entry.key.toString().toLowerCase();
+        if (keys.contains(key)) {
+          final text = entry.value?.toString().trim();
+          if (text != null && text.isNotEmpty && text != 'null') {
+            return text;
+          }
+        }
+      }
+      for (final entry in value.entries) {
+        final nested = _findNestedTextByKeys(entry.value, keys);
+        if (nested != null) {
+          return nested;
+        }
+      }
+    }
+    if (value is List) {
+      for (final item in value) {
+        final nested = _findNestedTextByKeys(item, keys);
+        if (nested != null) {
+          return nested;
+        }
+      }
+    }
+    return null;
+  }
 }
 
 class HuaweiStoreChannel extends BaseStoreChannel {
@@ -133,9 +196,12 @@ class HuaweiStoreChannel extends BaseStoreChannel {
 
   @override
   List<StoreCredentialDefinition> get credentialDefinitions => const [
-    StoreCredentialDefinition('client_id', desc: '客户端ID'),
-    StoreCredentialDefinition('client_secret', desc: '密钥'),
-  ];
+        StoreCredentialDefinition('client_id', desc: '客户端ID'),
+        StoreCredentialDefinition('client_secret', desc: '密钥'),
+      ];
+
+  @override
+  bool get allowsEmptyUpdateDesc => true;
 
   Future<String> _token() async {
     final result = await http.postJson(
@@ -146,8 +212,7 @@ class HuaweiStoreChannel extends BaseStoreChannel {
         'grant_type': 'client_credentials',
       },
     );
-    final token =
-        result['access_token'] ??
+    final token = result['access_token'] ??
         result['token'] ??
         result['data']?['access_token'];
     if (token == null ||
@@ -211,12 +276,46 @@ class HuaweiStoreChannel extends BaseStoreChannel {
       },
     );
     _checkHuaweiResult(result, '获取华为 App信息');
-    return _parseHuaweiMarketInfo(result);
+    return _parseHuaweiMarketInfo(
+      result,
+      fallbackUpdateDesc: await _fetchHuaweiFallbackUpdateDesc(
+        token,
+        appId,
+        result,
+      ),
+    );
   }
 
-  StoreReviewSnapshot _parseHuaweiMarketInfo(Map<String, dynamic> result) {
-    final rawInfo =
-        result['appInfo'] ??
+  Future<String?> _fetchHuaweiFallbackUpdateDesc(
+    String token,
+    String appId,
+    Map<String, dynamic> appInfo,
+  ) async {
+    final inline = fallbackUpdateDescFromDetail(appInfo);
+    if (inline != null && inline.isNotEmpty) {
+      return inline;
+    }
+    try {
+      final result = await http.getJson(
+        'https://connect-api.cloud.huawei.com/api/publish/v2/app-language-info',
+        query: {'appId': appId},
+        headers: {
+          'client_id': value('client_id'),
+          'Authorization': 'Bearer $token',
+        },
+      );
+      _checkHuaweiResult(result, '获取华为语言信息');
+      return fallbackUpdateDescFromDetail(result);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  StoreReviewSnapshot _parseHuaweiMarketInfo(
+    Map<String, dynamic> result, {
+    String? fallbackUpdateDesc,
+  }) {
+    final rawInfo = result['appInfo'] ??
         result['data']?['appInfo'] ??
         result['data'] ??
         result;
@@ -243,18 +342,36 @@ class HuaweiStoreChannel extends BaseStoreChannel {
       lastVersion: versionCode == null && versionName == null
           ? null
           : StoreVersion(versionCode ?? 0, versionName ?? ''),
+      fallbackUpdateDesc: fallbackUpdateDesc,
     );
   }
 
   @override
+  ReleasePlan resolveReleasePlan(
+    ReleasePlan versionParams,
+    StoreReviewSnapshot reviewSnapshot,
+  ) =>
+      resolveReleasePlanWithFallback(versionParams, reviewSnapshot);
+
+  @override
   Future<void> upload(
     File file,
-    ApkMetadata apkInfo,
+    String applicationId,
     ReleasePlan versionParams,
     ProgressCallback progress,
   ) async {
     final token = await _token();
-    final appId = await _appId(apkInfo.applicationId, token);
+    final appId = await _appId(applicationId, token);
+    final baselineInfo = await http.getJson(
+      'https://connect-api.cloud.huawei.com/api/publish/v2/app-info',
+      query: {'appId': appId},
+      headers: {
+        'client_id': value('client_id'),
+        'Authorization': 'Bearer $token',
+      },
+    );
+    _checkHuaweiResult(baselineInfo, '获取华为 App信息');
+    final baselineVersion = _visibleHuaweiVersion(baselineInfo);
     final upload = await http.getJson(
       'https://connect-api.cloud.huawei.com/api/publish/v2/upload-url/for-obs',
       query: {
@@ -268,20 +385,25 @@ class HuaweiStoreChannel extends BaseStoreChannel {
       },
     );
     _checkHuaweiResult(upload, '获取华为上传地址');
-    final uploadData =
-        upload['urlInfo'] ??
+    final uploadData = upload['urlInfo'] ??
         upload['uploadUrl'] ??
         upload['url'] ??
         upload['data'];
     if (uploadData is! Map) {
       throw StateError('获取华为上传地址失败: $upload');
     }
-    final url = requiredText(uploadData.cast<String, dynamic>(), const [
-      'url',
-    ], 'upload url');
-    final objectId = requiredText(uploadData.cast<String, dynamic>(), const [
-      'objectId',
-    ], 'objectId');
+    final url = requiredText(
+        uploadData.cast<String, dynamic>(),
+        const [
+          'url',
+        ],
+        'upload url');
+    final objectId = requiredText(
+        uploadData.cast<String, dynamic>(),
+        const [
+          'objectId',
+        ],
+        'objectId');
     final headers = uploadData['headers'] is Map
         ? (uploadData['headers'] as Map).cast<String, dynamic>()
         : <String, dynamic>{};
@@ -310,7 +432,7 @@ class HuaweiStoreChannel extends BaseStoreChannel {
       throw StateError('华为绑定Apk后缺少 pkgId: $bind');
     }
     await _waitHuaweiPackageReady(token, appId, pkgId);
-    await _waitHuaweiSubmitWindow(token, appId, apkInfo);
+    await _waitHuaweiSubmitWindow(token, appId, baselineVersion);
     final updateDesc = await http.putJson(
       'https://connect-api.cloud.huawei.com/api/publish/v2/app-language-info',
       query: {'appId': appId},
@@ -385,7 +507,7 @@ class HuaweiStoreChannel extends BaseStoreChannel {
   Future<void> _waitHuaweiSubmitWindow(
     String token,
     String appId,
-    ApkMetadata apkInfo,
+    StoreVersion? baselineVersion,
   ) async {
     final deadline = DateTime.now().add(const Duration(minutes: 2));
     while (DateTime.now().isBefore(deadline)) {
@@ -399,7 +521,7 @@ class HuaweiStoreChannel extends BaseStoreChannel {
         },
       );
       _checkHuaweiResult(result, '获取华为 App信息');
-      if (_isHuaweiDraftVersionVisible(result, apkInfo)) {
+      if (_isHuaweiDraftVersionVisible(result, baselineVersion)) {
         return;
       }
     }
@@ -407,14 +529,25 @@ class HuaweiStoreChannel extends BaseStoreChannel {
 
   bool _isHuaweiDraftVersionVisible(
     Map<String, dynamic> result,
-    ApkMetadata apkInfo,
+    StoreVersion? baselineVersion,
   ) {
-    final rawInfo =
-        result['appInfo'] ??
+    final visibleVersion = _visibleHuaweiVersion(result);
+    if (visibleVersion == null) {
+      return false;
+    }
+    if (baselineVersion == null) {
+      return true;
+    }
+    return visibleVersion.code != baselineVersion.code ||
+        visibleVersion.name != baselineVersion.name;
+  }
+
+  StoreVersion? _visibleHuaweiVersion(Map<String, dynamic> result) {
+    final rawInfo = result['appInfo'] ??
         result['data']?['appInfo'] ??
         result['data'] ??
         result;
-    if (rawInfo is! Map) return false;
+    if (rawInfo is! Map) return null;
     final info = rawInfo.cast<String, dynamic>();
     final visibleVersionCode = int.tryParse(
       info['versionCode']?.toString() ?? '',
@@ -423,8 +556,10 @@ class HuaweiStoreChannel extends BaseStoreChannel {
       info['versionNumber'],
       info['versionName'],
     ]);
-    return visibleVersionCode == apkInfo.versionCode &&
-        visibleVersionName == apkInfo.versionName;
+    if (visibleVersionCode == null && visibleVersionName == null) {
+      return null;
+    }
+    return StoreVersion(visibleVersionCode ?? 0, visibleVersionName ?? '');
   }
 }
 
@@ -437,15 +572,19 @@ class XiaomiStoreChannel extends BaseStoreChannel {
 
   @override
   List<StoreCredentialDefinition> get credentialDefinitions => const [
-    StoreCredentialDefinition('account', desc: '账号(邮箱)'),
-    StoreCredentialDefinition(
-      'publicKey',
-      desc: '公钥',
-      textFileExtension: 'cer',
-    ),
-    StoreCredentialDefinition('privateKey', desc: '私钥'),
-    StoreCredentialDefinition('iconPath', desc: '应用图标文件路径', pickFilePath: true),
-  ];
+        StoreCredentialDefinition('account', desc: '账号(邮箱)'),
+        StoreCredentialDefinition(
+          'publicKey',
+          desc: '公钥',
+          textFileExtension: 'cer',
+        ),
+        StoreCredentialDefinition('privateKey', desc: '私钥'),
+        StoreCredentialDefinition('iconPath',
+            desc: '应用图标文件路径', pickFilePath: true),
+      ];
+
+  @override
+  bool get allowsEmptyUpdateDesc => true;
 
   Map<String, dynamic> _sig(Map<String, dynamic> requestData, [File? file]) {
     final sigs = [
@@ -501,17 +640,25 @@ class XiaomiStoreChannel extends BaseStoreChannel {
               info['versionName']?.toString() ?? '',
             )
           : null,
+      fallbackUpdateDesc: fallbackUpdateDescFromDetail(result),
     );
   }
 
   @override
+  ReleasePlan resolveReleasePlan(
+    ReleasePlan versionParams,
+    StoreReviewSnapshot reviewSnapshot,
+  ) =>
+      resolveReleasePlanWithFallback(versionParams, reviewSnapshot);
+
+  @override
   Future<void> upload(
     File file,
-    ApkMetadata apkInfo,
+    String applicationId,
     ReleasePlan versionParams,
     ProgressCallback progress,
   ) async {
-    final appInfoResult = await _queryAppInfo(apkInfo.applicationId);
+    final appInfoResult = await _queryAppInfo(applicationId);
     checkApiSuccess(
       appInfoResult['result'] as num?,
       0,
@@ -534,7 +681,7 @@ class XiaomiStoreChannel extends BaseStoreChannel {
       'synchroType': 1,
       'appInfo': {
         'appName': packageInfo['appName']?.toString() ?? '',
-        'packageName': apkInfo.applicationId,
+        'packageName': applicationId,
         'updateDesc': versionParams.updateDesc,
         if (versionParams.onlineTime > 0)
           'onlineTime': versionParams.onlineTime,
@@ -572,9 +719,12 @@ class OppoStoreChannel extends BaseStoreChannel {
 
   @override
   List<StoreCredentialDefinition> get credentialDefinitions => const [
-    StoreCredentialDefinition('client_id'),
-    StoreCredentialDefinition('client_secret'),
-  ];
+        StoreCredentialDefinition('client_id'),
+        StoreCredentialDefinition('client_secret'),
+      ];
+
+  @override
+  bool get allowsEmptyUpdateDesc => true;
 
   Future<String> _token() async {
     final result = await http.getJson(
@@ -647,18 +797,26 @@ class OppoStoreChannel extends BaseStoreChannel {
         int.tryParse(info['version_code']?.toString() ?? '') ?? 0,
         info['version_name']?.toString() ?? '',
       ),
+      fallbackUpdateDesc: fallbackUpdateDescFromDetail(info),
     );
   }
 
   @override
+  ReleasePlan resolveReleasePlan(
+    ReleasePlan versionParams,
+    StoreReviewSnapshot reviewSnapshot,
+  ) =>
+      resolveReleasePlanWithFallback(versionParams, reviewSnapshot);
+
+  @override
   Future<void> upload(
     File file,
-    ApkMetadata apkInfo,
+    String applicationId,
     ReleasePlan versionParams,
     ProgressCallback progress,
   ) async {
     final token = await _token();
-    final appInfoResult = await _getOppoAppInfo(apkInfo.applicationId, token);
+    final appInfoResult = await _getOppoAppInfo(applicationId, token);
     checkApiSuccess(
       appInfoResult['errno'] as num?,
       0,
@@ -692,54 +850,94 @@ class OppoStoreChannel extends BaseStoreChannel {
       progress: progress,
     );
     final apkData = apkResult['data'] as Map;
+    final versionCodeText = findNestedTextByKeys(apkData, const [
+      'versionCode',
+      'version_code',
+      'pkgVersionCode',
+      'apkVersionCode',
+    ]);
+    final versionCode = int.tryParse(versionCodeText ?? '');
+    if (versionCode == null) {
+      throw StateError('OPPO 上传返回中缺少 versionCode: $apkResult');
+    }
     final params = {
-      'pkg_name': apkInfo.applicationId,
-      'version_code': apkInfo.versionCode.toString(),
+      'pkg_name': applicationId,
+      'version_code': versionCode.toString(),
       'apk_url': jsonEncode([
         {'url': apkData['url'], 'md5': apkData['md5'], 'cpu_code': 0},
       ]),
-      'app_name': requiredText(detail, const [
-        'app_name',
-        'appName',
-      ], 'app_name'),
+      'app_name': requiredText(
+          detail,
+          const [
+            'app_name',
+            'appName',
+          ],
+          'app_name'),
       'update_desc': versionParams.updateDesc,
-      'second_category_id': requiredText(detail, const [
-        'ver_second_category_id',
-        'second_category_id',
-      ], 'second_category_id'),
-      'third_category_id': requiredText(detail, const [
-        'ver_third_category_id',
-        'third_category_id',
-      ], 'third_category_id'),
+      'second_category_id': requiredText(
+          detail,
+          const [
+            'ver_second_category_id',
+            'second_category_id',
+          ],
+          'second_category_id'),
+      'third_category_id': requiredText(
+          detail,
+          const [
+            'ver_third_category_id',
+            'third_category_id',
+          ],
+          'third_category_id'),
       'summary': requiredText(detail, const ['summary'], 'summary'),
       'detail_desc': requiredText(detail, const ['detail_desc'], 'detail_desc'),
-      'privacy_source_url': requiredText(detail, const [
-        'privacy_source_url',
-      ], 'privacy_source_url'),
+      'privacy_source_url': requiredText(
+          detail,
+          const [
+            'privacy_source_url',
+          ],
+          'privacy_source_url'),
       'icon_url': requiredText(detail, const ['icon_url'], 'icon_url'),
       'pic_url': requiredText(detail, const ['pic_url'], 'pic_url'),
       'test_desc': requiredText(detail, const ['test_desc'], 'test_desc'),
-      'business_username': requiredText(detail, const [
-        'business_username',
-      ], 'business_username'),
-      'business_email': requiredText(detail, const [
-        'business_email',
-      ], 'business_email'),
-      'business_mobile': requiredText(detail, const [
-        'business_mobile',
-      ], 'business_mobile'),
-      'age_level': requiredText(detail, const [
-        'age_level',
-        'ageLevel',
-      ], 'age_level'),
-      'adaptive_equipment': requiredText(detail, const [
-        'adaptive_equipment',
-        'adaptiveEquipment',
-      ], 'adaptive_equipment'),
-      'copyright_url': requiredText(detail, const [
-        'copyright_url',
-        'copyrightUrl',
-      ], 'copyright_url'),
+      'business_username': requiredText(
+          detail,
+          const [
+            'business_username',
+          ],
+          'business_username'),
+      'business_email': requiredText(
+          detail,
+          const [
+            'business_email',
+          ],
+          'business_email'),
+      'business_mobile': requiredText(
+          detail,
+          const [
+            'business_mobile',
+          ],
+          'business_mobile'),
+      'age_level': requiredText(
+          detail,
+          const [
+            'age_level',
+            'ageLevel',
+          ],
+          'age_level'),
+      'adaptive_equipment': requiredText(
+          detail,
+          const [
+            'adaptive_equipment',
+            'adaptiveEquipment',
+          ],
+          'adaptive_equipment'),
+      'copyright_url': requiredText(
+          detail,
+          const [
+            'copyright_url',
+            'copyrightUrl',
+          ],
+          'copyright_url'),
       ...?adaptiveType == null ? null : {'adaptive_type': adaptiveType},
       ...?electronicCertUrl == null
           ? null
@@ -771,9 +969,12 @@ class VivoStoreChannel extends BaseStoreChannel {
 
   @override
   List<StoreCredentialDefinition> get credentialDefinitions => const [
-    StoreCredentialDefinition('access_key'),
-    StoreCredentialDefinition('access_secret'),
-  ];
+        StoreCredentialDefinition('access_key'),
+        StoreCredentialDefinition('access_secret'),
+      ];
+
+  @override
+  bool get allowsEmptyUpdateDesc => true;
 
   Map<String, String> _signed(String method, Map<String, String> params) {
     final data = {
@@ -805,6 +1006,10 @@ class VivoStoreChannel extends BaseStoreChannel {
     checkApiSuccess(subCode, 0, action, result['msg']?.toString() ?? '');
   }
 
+  String? _vivoFallbackUpdateDesc(Map<String, dynamic> info) {
+    return fallbackUpdateDescFromDetail(info);
+  }
+
   @override
   Future<StoreReviewSnapshot> fetchReviewSnapshot(String applicationId) async {
     final result = await http.getJson(
@@ -819,9 +1024,11 @@ class VivoStoreChannel extends BaseStoreChannel {
     final info = data.cast<String, dynamic>();
     final status = int.tryParse(info['status']?.toString() ?? '');
     final reviewState = switch (status) {
+      1 => StoreReviewState.draft,
       2 => StoreReviewState.underReview,
       3 => StoreReviewState.online,
       4 => StoreReviewState.rejected,
+      5 => StoreReviewState.withdrawn,
       _ => StoreReviewState.unknown,
     };
     return StoreReviewSnapshot(
@@ -831,13 +1038,21 @@ class VivoStoreChannel extends BaseStoreChannel {
         int.tryParse(info['versionCode']?.toString() ?? '') ?? 0,
         info['versionName']?.toString() ?? '',
       ),
+      fallbackUpdateDesc: _vivoFallbackUpdateDesc(info),
     );
   }
 
   @override
+  ReleasePlan resolveReleasePlan(
+    ReleasePlan versionParams,
+    StoreReviewSnapshot reviewSnapshot,
+  ) =>
+      resolveReleasePlanWithFallback(versionParams, reviewSnapshot);
+
+  @override
   Future<void> upload(
     File file,
-    ApkMetadata apkInfo,
+    String applicationId,
     ReleasePlan versionParams,
     ProgressCallback progress,
   ) async {
@@ -846,7 +1061,7 @@ class VivoStoreChannel extends BaseStoreChannel {
       file: file,
       fileField: 'file',
       query: _signed('app.upload.apk.app', {
-        'packageName': apkInfo.applicationId,
+        'packageName': applicationId,
         'fileMd5': await fileMd5(file),
       }),
       progress: progress,
@@ -878,6 +1093,9 @@ class HonorStoreChannel extends HuaweiStoreChannel {
   @override
   String get apkFileMarker => 'HONOR';
 
+  @override
+  bool get allowsEmptyUpdateDesc => true;
+
   Future<String> _honorToken() async {
     final result = await http.postForm(
       'https://iam.developer.honor.com/auth/token',
@@ -887,8 +1105,7 @@ class HonorStoreChannel extends HuaweiStoreChannel {
         'grant_type': 'client_credentials',
       },
     );
-    final token =
-        result['access_token'] ??
+    final token = result['access_token'] ??
         result['token'] ??
         result['data']?['access_token'];
     if (token == null ||
@@ -928,9 +1145,8 @@ class HonorStoreChannel extends HuaweiStoreChannel {
     String token,
   ) async {
     final rawData = result['data'] ?? result;
-    final data = rawData is Map
-        ? rawData.cast<String, dynamic>()
-        : <String, dynamic>{};
+    final data =
+        rawData is Map ? rawData.cast<String, dynamic>() : <String, dynamic>{};
     final auditResult = int.tryParse(data['auditResult']?.toString() ?? '');
     final reviewState = switch (auditResult) {
       0 => StoreReviewState.underReview,
@@ -969,10 +1185,10 @@ class HonorStoreChannel extends HuaweiStoreChannel {
     final submitDisabledReason = phasedReleaseActive
         ? '存在待分阶段发布或分阶段发布中的版本'
         : scheduledReleasePending
-        ? '存在待发布时间的版本'
-        : auditResult == 0
-        ? '当前版本审核中'
-        : null;
+            ? '存在待发布时间的版本'
+            : auditResult == 0
+                ? '当前版本审核中'
+                : null;
 
     return StoreReviewSnapshot(
       reviewState: reviewState,
@@ -982,8 +1198,16 @@ class HonorStoreChannel extends HuaweiStoreChannel {
           ? null
           : StoreVersion(versionCode ?? 0, versionName ?? ''),
       submitDisabledReason: submitDisabledReason,
+      fallbackUpdateDesc: fallbackUpdateDescFromDetail(detail),
     );
   }
+
+  @override
+  ReleasePlan resolveReleasePlan(
+    ReleasePlan versionParams,
+    StoreReviewSnapshot reviewSnapshot,
+  ) =>
+      resolveReleasePlanWithFallback(versionParams, reviewSnapshot);
 
   Future<bool> _hasHonorPhasedRelease(String appId, String token) async {
     final result = await http.getJson(
@@ -1036,7 +1260,7 @@ class HonorStoreChannel extends HuaweiStoreChannel {
   @override
   Future<void> upload(
     File file,
-    ApkMetadata apkInfo,
+    String applicationId,
     ReleasePlan versionParams,
     ProgressCallback progress,
   ) async {
@@ -1044,7 +1268,7 @@ class HonorStoreChannel extends HuaweiStoreChannel {
     final auth = 'Bearer $token';
     final appIdResult = await http.getJson(
       'https://appmarket-openapi-drcn.cloud.honor.com/openapi/v1/publish/get-app-id',
-      query: {'pkgName': apkInfo.applicationId},
+      query: {'pkgName': applicationId},
       headers: {'Authorization': auth},
     );
     _checkHonorResult(appIdResult, '获取荣耀 AppId');
@@ -1056,8 +1280,7 @@ class HonorStoreChannel extends HuaweiStoreChannel {
       headers: {'Authorization': auth},
     );
     _checkHonorResult(appInfo, '获取荣耀 App信息');
-    final languageInfo =
-        appInfo['data']?['languageInfo'] is List &&
+    final languageInfo = appInfo['data']?['languageInfo'] is List &&
             (appInfo['data']['languageInfo'] as List).isNotEmpty
         ? (appInfo['data']['languageInfo'] as List).first as Map
         : const {};

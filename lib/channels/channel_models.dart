@@ -1,9 +1,11 @@
 import 'dart:io';
 
 enum StoreReviewState {
+  draft('草稿'),
   online('已上线'),
   underReview('审核中'),
   rejected('被拒绝'),
+  withdrawn('已撤审'),
   unknown('未知状态');
 
   const StoreReviewState(this.label);
@@ -16,12 +18,14 @@ class StoreReviewSnapshot {
     this.enableSubmit = true,
     this.lastVersion,
     this.submitDisabledReason,
+    this.fallbackUpdateDesc,
   });
 
   final StoreReviewState reviewState;
   final bool enableSubmit;
   final StoreVersion? lastVersion;
   final String? submitDisabledReason;
+  final String? fallbackUpdateDesc;
 }
 
 class StoreVersion {
@@ -50,6 +54,13 @@ class ReleasePlan {
 
   final String updateDesc;
   final int onlineTime;
+
+  ReleasePlan copyWith({String? updateDesc, int? onlineTime}) {
+    return ReleasePlan(
+      updateDesc: updateDesc ?? this.updateDesc,
+      onlineTime: onlineTime ?? this.onlineTime,
+    );
+  }
 }
 
 class ApiException implements Exception {
@@ -80,13 +91,13 @@ sealed class PublishState {
   bool get finish => this is PublishSuccess || this is PublishFailure;
   bool get success => this is PublishSuccess;
   String get label => switch (this) {
-    PublishIdle() => '未开始',
-    PublishWaiting() => '等待中',
-    PublishUploading(:final progress) => '上传中 $progress%',
-    PublishProcessing(:final action) => action,
-    PublishSuccess() => '成功',
-    PublishFailure(:final error) => error.toString(),
-  };
+        PublishIdle() => '未开始',
+        PublishWaiting() => '等待中',
+        PublishUploading(:final progress) => '上传中 $progress%',
+        PublishProcessing(:final action) => action,
+        PublishSuccess() => '成功',
+        PublishFailure(:final error) => error.toString(),
+      };
 }
 
 class PublishIdle extends PublishState {
@@ -138,21 +149,28 @@ abstract class StoreChannel {
   String get storeName;
   String get apkFileMarker;
   List<StoreCredentialDefinition> get credentialDefinitions;
+  bool get allowsEmptyUpdateDesc => false;
 
   List<StoreCredentialDefinition> get params => [
-    ...credentialDefinitions,
-    StoreCredentialDefinition(
-      'fileNameIdentify',
-      defaultValue: apkFileMarker,
-      desc: '文件名标识,不区分大小写',
-    ),
-  ];
+        ...credentialDefinitions,
+        StoreCredentialDefinition(
+          'fileNameIdentify',
+          defaultValue: apkFileMarker,
+          desc: '文件名标识,不区分大小写',
+        ),
+      ];
 
   void init(Map<String, String?> params);
 
+  ReleasePlan resolveReleasePlan(
+    ReleasePlan versionParams,
+    StoreReviewSnapshot reviewSnapshot,
+  ) =>
+      versionParams;
+
   Future<void> upload(
     File file,
-    ApkMetadata apkInfo,
+    String applicationId,
     ReleasePlan versionParams,
     ProgressCallback progress,
   );
